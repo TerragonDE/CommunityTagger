@@ -1,8 +1,7 @@
 # CommunityTagger
 Collaborative tagging of images with a one-file WebUI for written in php and javascript.
 ![alt text](https://github.com/TerragonDE/CommunityTagger/blob/main/screenshot.png?raw=true)
-
-![Screenshot]([screenshot.png](screenshot.png))
+Test: https://tagger.a2office.de/
 # Why?
 Invite friends to upload images and tag them together, to build high quality datasets for lora/hypernetwork training in stable diffusion. 
 # Installation
