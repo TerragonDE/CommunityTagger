@@ -1,5 +1,6 @@
 # CommunityTagger
 Collaborative tagging of images with a one-file WebUI for written in php and javascript.
+https://tagger.a2office.de/screenshot.png
 # Why?
 Invite friends to upload images and tag them together, to build high quality datasets for lora/hypernetwork training in stable diffusion. 
 # Installation
