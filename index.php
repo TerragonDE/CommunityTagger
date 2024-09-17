@@ -1,211 +1,417 @@
 <?php
 session_start();
 
-$baseUploadsDir = 'uploads/';
-
-// Function to make filenames URL-compatible
-function makeFilenameUrlSafe($filename) {
-    return strtolower(preg_replace('/[^a-zA-Z0-9_-]/', '-', $filename));
+// Set default folder
+if (!isset($_SESSION['folder'])) {
+    $_SESSION['folder'] = 'default';
 }
 
-// Set and remember folder name independently
+// Handle folder selection
 if (isset($_POST['set_folder'])) {
-    $_SESSION['upload_dir'] = makeFilenameUrlSafe($_POST['upload_dir']);
+    $folder_name = preg_replace('/[^A-Za-z0-9_-]/', '', $_POST['folder_name']);
+    if (!is_dir('uploads/' . $folder_name)) {
+        mkdir('uploads/' . $folder_name, 0777, true);
+    }
+    $_SESSION['folder'] = $folder_name;
 }
 
-// Use folder from session or create a default one
-$uploadDir = isset($_SESSION['upload_dir']) ? $baseUploadsDir . $_SESSION['upload_dir'] . '/' : null;
-if ($uploadDir && !is_dir($uploadDir)) {
-    mkdir($uploadDir, 0777, true); // Create directory if it doesn't exist
+// Set current folder
+$current_folder = 'uploads/' . $_SESSION['folder'];
+if (!is_dir($current_folder)) {
+    mkdir($current_folder, 0777, true);
 }
 
-// Handle the "Save and Update All Tags" form submission
-if (isset($_POST['save_all_tags']) && $uploadDir) {
-    $fileNames = $_POST['filenames'];
-    $tagsArray = $_POST['tags'];
+// Do not allow uploads in the default directory
+$allow_upload = $_SESSION['folder'] !== 'default';
 
-    foreach ($fileNames as $index => $fileName) {
-        $tagString = trim($tagsArray[$index]);
-        if (!empty($tagString)) {
-            // Process tags: Remove duplicates, empty values, and trim whitespaces
-            $tags = array_unique(array_filter(array_map('trim', explode(',', $tagString))));
+// Handle file uploads (images and txt files)
+if ($allow_upload && isset($_FILES['files'])) {
+    // Collect uploaded files grouped by original basename
+    $uploaded_files = [];
+    foreach ($_FILES['files']['name'] as $key => $name) {
+        $tmp_name = $_FILES['files']['tmp_name'][$key];
+        $error = $_FILES['files']['error'][$key];
+        if ($error == UPLOAD_ERR_OK) {
+            $name = preg_replace('/[^A-Za-z0-9_\.-]/', '_', $name);
+            $path_parts = pathinfo($name);
+            $ext = strtolower($path_parts['extension']);
+            $filename = $path_parts['filename'];
+            if (in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'txt'])) {
+                $uploaded_files[$filename][] = [
+                    'tmp_name' => $tmp_name,
+                    'extension' => $ext,
+                ];
+            }
+        }
+    }
 
-            // Save the clean tag string back into the .txt file
-            if (!empty($tags)) {
-                $tagFile = $uploadDir . pathinfo($fileName, PATHINFO_FILENAME) . '.txt';
-                file_put_contents($tagFile, implode(', ', $tags));  // Create/overwrite .txt file with tags
+    // Existing basenames to check for collisions
+    $existing_files = scandir($current_folder);
+    $existing_basenames = [];
+    foreach ($existing_files as $file) {
+        if (is_file($current_folder . '/' . $file)) {
+            $existing_basenames[] = pathinfo($file, PATHINFO_FILENAME);
+        }
+    }
+
+    // Process uploaded files
+    foreach ($uploaded_files as $original_basename => $files) {
+        $new_basename = $original_basename;
+        // Check for name collisions
+        while (in_array($new_basename, $existing_basenames)) {
+            $rand = rand(1000, 9999);
+            $new_basename = $original_basename . '_' . $rand;
+        }
+        // Add to existing basenames
+        $existing_basenames[] = $new_basename;
+
+        // Move files with the new basename
+        foreach ($files as $file_info) {
+            $tmp_name = $file_info['tmp_name'];
+            $ext = $file_info['extension'];
+            $new_name = $new_basename . '.' . $ext;
+            move_uploaded_file($tmp_name, $current_folder . '/' . $new_name);
+
+            if (in_array($ext, ['jpg', 'jpeg', 'png', 'gif'])) {
+                // For images, ensure tag file exists
+                $tag_file = $current_folder . '/' . $new_basename . '.txt';
+                if (!file_exists($tag_file)) {
+                    file_put_contents($tag_file, '');
+                }
             }
         }
     }
 }
 
-// Create ZIP for download based on current session folder
-if (isset($_POST['download_zip']) && $uploadDir) {
-    $zip = new ZipArchive();
-    $zipFilename = $uploadDir . "images_and_tags.zip";
+// Handle tag updates via Ajax
+if (isset($_POST['action']) && $_POST['action'] == 'update_tags') {
+    $image = basename($_POST['image']); // Sanitize
+    $filename = pathinfo($image, PATHINFO_FILENAME);
+    $tag_file = $current_folder . '/' . $filename . '.txt';
+    $tags = $_POST['tags'];
+    file_put_contents($tag_file, $tags);
+    echo 'success';
+    exit;
+}
 
-    if ($zip->open($zipFilename, ZipArchive::CREATE | ZipArchive::OVERWRITE) === TRUE) {
-        foreach (glob($uploadDir . "*.{jpg,jpeg,png,gif,txt}", GLOB_BRACE) as $file) {
+// Handle adding tag to selected images via Ajax
+if (isset($_POST['action']) && $_POST['action'] == 'add_tag') {
+    $tag = $_POST['tag'];
+    $selected_images = $_POST['selected_images'];
+    foreach ($selected_images as $image) {
+        $image = basename($image); // Sanitize
+        $filename = pathinfo($image, PATHINFO_FILENAME);
+        $tag_file = $current_folder . '/' . $filename . '.txt';
+        $tags = '';
+        if (file_exists($tag_file)) {
+            $tags = file_get_contents($tag_file);
+        }
+        $tags_array = array_map('trim', explode(',', $tags));
+        if (!in_array($tag, $tags_array)) {
+            $tags_array[] = $tag;
+        }
+        $new_tags = implode(', ', array_filter($tags_array));
+        file_put_contents($tag_file, $new_tags);
+    }
+    echo 'success';
+    exit;
+}
+
+// Handle downloading of tags (for loading tags via AJAX)
+if (isset($_GET['action']) && $_GET['action'] == 'get_tags') {
+    $image = basename($_GET['image']); // Sanitize
+    $filename = pathinfo($image, PATHINFO_FILENAME);
+    $tag_file = $current_folder . '/' . $filename . '.txt';
+    if (file_exists($tag_file)) {
+        echo file_get_contents($tag_file);
+    }
+    exit;
+}
+
+// Handle download zip
+if (isset($_GET['download_zip'])) {
+    $zip = new ZipArchive();
+    $zip_name = $current_folder . '.zip';
+    if ($zip->open($zip_name, ZipArchive::CREATE) !== TRUE) {
+        exit("Cannot open <$zip_name>\n");
+    }
+    $files = glob($current_folder . '/*');
+    foreach ($files as $file) {
+        if (is_file($file)) {
             $zip->addFile($file, basename($file));
         }
-        $zip->close();
-
-        header('Content-Type: application/zip');
-        header('Content-disposition: attachment; filename=' . basename($zipFilename));
-        header('Content-Length: ' . filesize($zipFilename));
-        readfile($zipFilename);
-        exit;
     }
+    $zip->close();
+    header('Content-Type: application/zip');
+    header('Content-disposition: attachment; filename=' . basename($zip_name));
+    header('Content-Length: ' . filesize($zip_name));
+    readfile($zip_name);
+    unlink($zip_name); // Remove zip file after download
+    exit;
 }
 
-// Handle image upload to the selected directory
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['new_images'])) {
-    $files = $_FILES['new_images'];
-    $fileCount = count($files['name']);
+// Get list of images
+$images = glob($current_folder . '/*.{jpg,jpeg,png,gif}', GLOB_BRACE);
 
-    for ($i = 0; $i < $fileCount; $i++) {
-        $originalFilename = pathinfo($files['name'][$i], PATHINFO_FILENAME);
-        $extension = pathinfo($files['name'][$i], PATHINFO_EXTENSION);
-
-        if (in_array($extension, ['jpg', 'jpeg', 'png', 'gif'])) {
-            $safeFilename = makeFilenameUrlSafe($originalFilename);
-            $newFilename = $safeFilename . '.' . $extension;
-
-            // Append random number if file exists
-            while (file_exists($uploadDir . $newFilename)) {
-                $newFilename = $safeFilename . '-' . rand(1000, 9999) . '.' . $extension;
-            }
-
-            move_uploaded_file($files['tmp_name'][$i], $uploadDir . $newFilename);
-        }
+// Get list of previously used tags
+$all_tags = [];
+foreach ($images as $image) {
+    $basename = basename($image);
+    $filename = pathinfo($basename, PATHINFO_FILENAME);
+    $tag_file = $current_folder . '/' . $filename . '.txt';
+    if (file_exists($tag_file)) {
+        $tags = file_get_contents($tag_file);
+        $tags_array = array_map('trim', explode(',', $tags));
+        $all_tags = array_merge($all_tags, $tags_array);
     }
 }
-
-// Load images and tags from the selected folder
-$files = $uploadDir ? glob($uploadDir . '*.{jpg,jpeg,png,gif}', GLOB_BRACE) : [];
-$allTags = [];
-
-if ($uploadDir && is_dir($uploadDir)) {
-    foreach ($files as $file) {
-        $tagFile = $uploadDir . pathinfo($file, PATHINFO_FILENAME) . '.txt';
-        if (file_exists($tagFile)) {
-            $imageTags = file_get_contents($tagFile);
-            $imageTagsArray = array_unique(array_filter(array_map('trim', explode(',', $imageTags))));
-            $allTags = array_merge($allTags, $imageTagsArray);
-        }
-    }
-
-    $allTags = array_unique(array_map('trim', $allTags));
-}
+$all_tags = array_unique(array_filter($all_tags));
+sort($all_tags);
 ?>
-
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Image Tagging System</title>
+    <title>Image Tagging</title>
     <style>
-        body { margin: 0; padding: 0; display: flex; height: 100vh; }
-        #left-panel { width: 25%; overflow-y: auto; padding: 10px; background-color: #f9f9f9; box-shadow: 2px 0 5px rgba(0,0,0,0.1); display: flex; flex-direction: column; justify-content: space-between; }
-        #right-panel { width: 75%; overflow-y: auto; padding: 20px; }
-        .thumbnail { width: 150px; height: 150px; cursor: pointer; }
-        .image-block { display: inline-block; text-align: center; margin: 15px; vertical-align: top; }
-        .image-block textarea { width: 150px; height: 150px; font-size: 14px; resize: none; }
-        .tag-list { margin: 10px; padding: 5px; border: 1px solid #ccc; display: inline-block; }
-        .tag { margin: 5px; padding: 5px; background-color: #e1e1e1; cursor: pointer; display: inline-block; }
-        #image-container { display: flex; flex-wrap: wrap; }
-        .selected { border: 2px solid blue; }
-        input[type="file"] { margin: 20px; }
-        #save-btn { background-color: darkblue; color: white; padding: 10px 20px; border: none; cursor: pointer; margin-top: 20px; }
-        #save-btn:hover { background-color: navy; }
+        body { margin: 0; font-family: Arial, sans-serif; }
+        .container { display: flex; height: 100vh; overflow: hidden; }
+        .left { width: 25%; padding: 10px; box-sizing: border-box;
+            display: flex; flex-direction: column; }
+        .left-top { flex: 1; overflow-y: auto; }
+        .left-bottom { margin-top: 10px; }
+        .right { width: 75%; overflow-y: auto; padding: 10px;
+            box-sizing: border-box; }
+        .image-container { display: flex; flex-wrap: wrap; }
+        .image-item {
+            width: 150px;
+            margin: 5px;
+            position: relative;
+            border: 2px solid transparent;
+            cursor: pointer;
+            display: inline-block;
+            vertical-align: top;
+        }
+        .image-item.selected { border: 2px solid blue; }
+        .image-wrapper {
+            width: 150px;
+            height: 150px;
+            overflow: hidden;
+        }
+        .image-wrapper img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            object-position: center;
+        }
+        .tags-input {
+            width: 100%;
+            box-sizing: border-box;
+            height: 150px;
+            resize: none;
+            margin-top: 5px;
+        }
+        .tag { display: inline-block; background-color: #ddd;
+            padding: 5px; margin: 2px; cursor: pointer; }
+        .tag:hover { background-color: #ccc; }
+        .button { padding: 10px; background-color: darkblue; color: white;
+            border: none; cursor: pointer; margin: 5px 0; }
+        .button:hover { background-color: blue; }
+        h3 { margin-top: 0; }
+        form { margin-bottom: 10px; }
+        input[type="text"], input[type="file"] { width: 100%; margin-bottom: 5px; }
+        .disabled { opacity: 0.5; pointer-events: none; }
     </style>
 </head>
 <body>
 
-<!-- Right Panel: Tag Images -->
-<div id="right-panel">
-    <form method="POST" id="save-all-tags-form">
-        <!-- Save and Update All Tags Button on top of the image block -->
-        <button id="save-btn" type="submit" name="save_all_tags">Save and Update All Tags</button>
-
-        <input type="hidden" name="upload_dir" value="<?php echo isset($_SESSION['upload_dir']) ? htmlspecialchars($_SESSION['upload_dir']) : ''; ?>">
-        <div id="image-container">
-            <?php if ($files): ?>
-                <?php foreach ($files as $file): ?>
-                    <div class="image-block" onclick="toggleSelect(this)">
-                        <img src="<?php echo $file; ?>" class="thumbnail" alt="Image Thumbnail" data-filename="<?php echo basename($file); ?>">
-                        <textarea name="tags[]" placeholder="Add tags (comma separated)"><?php
-                            $tagFile = $uploadDir . pathinfo($file, PATHINFO_FILENAME) . '.txt';
-                            if (file_exists($tagFile)) {
-                                echo file_get_contents($tagFile);
-                            }
-                        ?></textarea>
-                        <input type="hidden" name="filenames[]" value="<?php echo basename($file); ?>">
-                    </div>
+<div class="container">
+    <div class="left">
+        <div class="left-top">
+            <h3>Previously Used Tags</h3>
+            <div id="previous-tags">
+                <?php foreach ($all_tags as $tag): ?>
+                    <span class="tag" data-tag="<?= htmlspecialchars($tag) ?>">
+                        <?= htmlspecialchars($tag) ?>
+                    </span>
                 <?php endforeach; ?>
-            <?php else: ?>
-                <p>No images found in the selected folder.</p>
-            <?php endif; ?>
+            </div>
         </div>
-    </form>
-</div>
-
-<!-- Left Panel: Last Used Tags and Upload Section -->
-<div id="left-panel">
-    <div>
-        <!-- Previously Used Tags -->
-        <h2>Previously Used Tags</h2>
-        <div class="tag-list">
-            <?php foreach ($allTags as $tag): ?>
-                <span class="tag" onclick="addTagToCheckedImages('<?php echo $tag; ?>')"><?php echo $tag; ?></span>
-            <?php endforeach; ?>
+        <div class="left-bottom">
+            <h3>Set Folder</h3>
+            <form method="post">
+                <input type="text" name="folder_name" placeholder="Folder Name"
+                    value="<?= htmlspecialchars($_SESSION['folder']) ?>">
+                <button type="submit" name="set_folder">Set Folder</button>
+            </form>
+            <?php if ($allow_upload): ?>
+            <h3>Upload New Images</h3>
+            <form method="post" enctype="multipart/form-data">
+                <input type="file" name="files[]" multiple>
+                <button type="submit">Upload Files</button>
+            </form>
+            <?php else: ?>
+            <h3>Upload New Images</h3>
+            <p style="color:red;">Uploads are not allowed in the default folder. Please set a different folder.</p>
+            <?php endif; ?>
+            <button class="button" onclick="downloadZip()">
+                Download All as ZIP</button>
         </div>
     </div>
-
-    <div>
-        <!-- Folder Selection -->
-        <h2>Select Folder</h2>
-        <form method="POST">
-            <input type="text" name="upload_dir" value="<?php echo isset($_SESSION['upload_dir']) ? htmlspecialchars($_SESSION['upload_dir']) : ''; ?>" placeholder="Folder name" required>
-            <button type="submit" name="set_folder">Set Folder</button>
-        </form>
-
-        <!-- Image Upload -->
-        <h2>Upload New Images</h2>
-        <form method="POST" enctype="multipart/form-data">
-            <input type="file" name="new_images[]" accept="image/*" multiple required>
-            <button type="submit">Upload Images</button>
-        </form>
-
-        <!-- Download ZIP -->
-        <form method="POST">
-            <button type="submit" name="download_zip">Download All as ZIP</button>
-        </form>
+    <div class="right">
+        <div class="image-container">
+            <?php foreach ($images as $image): ?>
+                <?php
+                $basename = basename($image);
+                $filename = pathinfo($basename, PATHINFO_FILENAME);
+                ?>
+                <div class="image-item"
+                    data-image="<?= htmlspecialchars($basename) ?>">
+                    <div class="image-wrapper">
+                        <img src="<?= htmlspecialchars($image) ?>" alt="">
+                    </div>
+                    <textarea class="tags-input"
+                        placeholder="Tags (comma separated)"></textarea>
+                </div>
+            <?php endforeach; ?>
+        </div>
     </div>
 </div>
 
 <script>
-// Toggling image selection by adding/removing the blue border
-function toggleSelect(imageBlock) {
-    let img = imageBlock.querySelector('img');
-    img.classList.toggle('selected');
+var selectedImages = [];
+
+document.addEventListener('DOMContentLoaded', function() {
+    var imageItems = document.querySelectorAll('.image-item');
+    imageItems.forEach(function(item) {
+        var imageName = item.getAttribute('data-image');
+        var textarea = item.querySelector('.tags-input');
+        // Load tags
+        loadTags(imageName, textarea);
+        // Image click to select
+        item.addEventListener('click', function(e) {
+            if (e.target.tagName.toLowerCase() != 'textarea') {
+                item.classList.toggle('selected');
+                var index = selectedImages.indexOf(imageName);
+                if (index > -1) {
+                    selectedImages.splice(index, 1);
+                } else {
+                    selectedImages.push(imageName);
+                }
+            }
+        });
+        // Auto-save tags when textarea loses focus
+        textarea.addEventListener('blur', function() {
+            saveTags(imageName, textarea.value);
+        });
+    });
+
+    // Handle clicking on previously used tags
+    var tags = document.querySelectorAll('.tag');
+    tags.forEach(function(tag) {
+        tag.addEventListener('click', function() {
+            var tagText = tag.getAttribute('data-tag');
+            if (selectedImages.length > 0) {
+                addTagToSelectedImages(tagText);
+            } else {
+                alert('Please select images to add tag.');
+            }
+        });
+    });
+});
+
+function loadTags(imageName, textarea) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', '<?= basename($_SERVER['PHP_SELF']); ?>?action=get_tags&image='
+        + encodeURIComponent(imageName), true);
+    xhr.onload = function() {
+        if (xhr.status == 200) {
+            textarea.value = xhr.responseText;
+        }
+    };
+    xhr.send();
 }
 
-// Add tag to checked images
-function addTagToCheckedImages(tag) {
-    let selectedImages = document.querySelectorAll('.selected');
+function saveTags(imageName, tags) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '<?= basename($_SERVER['PHP_SELF']); ?>', true);
+    xhr.setRequestHeader('Content-type',
+        'application/x-www-form-urlencoded');
+    xhr.onload = function() {
+        if (xhr.status == 200) {
+            updatePreviouslyUsedTags(tags);
+        }
+    };
+    xhr.send('action=update_tags&image='
+        + encodeURIComponent(imageName)
+        + '&tags=' + encodeURIComponent(tags));
+}
 
-    selectedImages.forEach(image => {
-        let parentBlock = image.closest('.image-block');
-        let tagInput = parentBlock.querySelector('textarea');
-        let currentTags = tagInput.value.split(',').map(t => t.trim()).filter(t => t !== '');
-
-        if (!currentTags.includes(tag)) {
-            currentTags.push(tag);
-            tagInput.value = currentTags.join(', ');
+function updatePreviouslyUsedTags(newTags) {
+    var tagsArray = [];
+    if (typeof newTags === 'string') {
+        tagsArray = newTags.split(',').map(function(t) {
+            return t.trim();
+        });
+    } else if (Array.isArray(newTags)) {
+        tagsArray = newTags;
+    } else {
+        tagsArray = [newTags];
+    }
+    var previousTags = document.querySelectorAll('#previous-tags .tag');
+    var existingTags = [];
+    previousTags.forEach(function(tag) {
+        existingTags.push(tag.getAttribute('data-tag'));
+    });
+    tagsArray.forEach(function(tag) {
+        if (existingTags.indexOf(tag) == -1 && tag != '') {
+            var span = document.createElement('span');
+            span.className = 'tag';
+            span.setAttribute('data-tag', tag);
+            span.textContent = tag;
+            span.addEventListener('click', function() {
+                if (selectedImages.length > 0) {
+                    addTagToSelectedImages(tag);
+                } else {
+                    alert('Please select images to add tag.');
+                }
+            });
+            document.getElementById('previous-tags')
+                .appendChild(span);
         }
     });
+}
+
+function addTagToSelectedImages(tag) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '<?= basename($_SERVER['PHP_SELF']); ?>', true);
+    xhr.setRequestHeader('Content-type',
+        'application/x-www-form-urlencoded');
+    var data = 'action=add_tag&tag=' + encodeURIComponent(tag)
+        + '&selected_images[]='
+        + selectedImages.map(encodeURIComponent)
+            .join('&selected_images[]=');
+    xhr.onload = function() {
+        if (xhr.status == 200) {
+            selectedImages.forEach(function(imageName) {
+                var item = document.querySelector('.image-item[data-image="'
+                    + imageName + '"]');
+                var textarea = item.querySelector('.tags-input');
+                var tags = textarea.value.split(',').map(function(t) {
+                    return t.trim();
+                });
+                if (tags.indexOf(tag) == -1) {
+                    tags.push(tag);
+                    textarea.value = tags.join(', ');
+                }
+            });
+            updatePreviouslyUsedTags(tag);
+        }
+    };
+    xhr.send(data);
+}
+
+function downloadZip() {
+    window.location.href = '<?= basename($_SERVER['PHP_SELF']); ?>?download_zip=1';
 }
 </script>
 
