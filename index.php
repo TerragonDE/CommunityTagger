@@ -84,37 +84,71 @@ if ($allow_upload && isset($_FILES['files'])) {
 }
 
 // Handle tag updates via Ajax
-if (isset($_POST['action']) && $_POST['action'] == 'update_tags') {
-    $image = basename($_POST['image']); // Sanitize
-    $filename = pathinfo($image, PATHINFO_FILENAME);
-    $tag_file = $current_folder . '/' . $filename . '.txt';
-    $tags = $_POST['tags'];
-    file_put_contents($tag_file, $tags);
-    echo 'success';
-    exit;
-}
-
-// Handle adding tag to selected images via Ajax
-if (isset($_POST['action']) && $_POST['action'] == 'add_tag') {
-    $tag = $_POST['tag'];
-    $selected_images = $_POST['selected_images'];
-    foreach ($selected_images as $image) {
-        $image = basename($image); // Sanitize
+if (isset($_POST['action'])) {
+    if ($_POST['action'] == 'update_tags') {
+        $image = basename($_POST['image']); // Sanitize
         $filename = pathinfo($image, PATHINFO_FILENAME);
         $tag_file = $current_folder . '/' . $filename . '.txt';
-        $tags = '';
-        if (file_exists($tag_file)) {
-            $tags = file_get_contents($tag_file);
-        }
+        $tags = $_POST['tags'];
+        // Clean up the tags
         $tags_array = array_map('trim', explode(',', $tags));
-        if (!in_array($tag, $tags_array)) {
-            $tags_array[] = $tag;
-        }
-        $new_tags = implode(', ', array_filter($tags_array));
-        file_put_contents($tag_file, $new_tags);
+        $tags_array = array_filter($tags_array); // Remove empty elements
+        $clean_tags = implode(', ', $tags_array);
+        file_put_contents($tag_file, $clean_tags);
+        echo 'success';
+        exit;
     }
-    echo 'success';
-    exit;
+
+    // Handle adding tag to selected images via Ajax
+    if ($_POST['action'] == 'add_tag') {
+        $tag = trim($_POST['tag']);
+        $selected_images = $_POST['selected_images'];
+        foreach ($selected_images as $image) {
+            $image = basename($image); // Sanitize
+            $filename = pathinfo($image, PATHINFO_FILENAME);
+            $tag_file = $current_folder . '/' . $filename . '.txt';
+            $tags = '';
+            if (file_exists($tag_file)) {
+                $tags = file_get_contents($tag_file);
+            }
+            $tags_array = array_map('trim', explode(',', $tags));
+            if (!in_array($tag, $tags_array) && $tag != '') {
+                $tags_array[] = $tag;
+            }
+            $tags_array = array_filter($tags_array); // Remove empty elements
+            $clean_tags = implode(', ', $tags_array);
+            file_put_contents($tag_file, $clean_tags);
+        }
+        echo 'success';
+        exit;
+    }
+
+    // Handle deleting selected images via Ajax
+    if ($_POST['action'] == 'delete_selected') {
+        $selected_images = $_POST['selected_images'];
+        if (count($selected_images) > 10) {
+            echo 'You can delete a maximum of 10 images at a time.';
+            exit;
+        }
+        $deleted_images = [];
+        foreach ($selected_images as $image) {
+            $image = basename($image); // Sanitize
+            $filename = pathinfo($image, PATHINFO_FILENAME);
+            $image_file = $current_folder . '/' . $image;
+            $tag_file = $current_folder . '/' . $filename . '.txt';
+
+            // Ensure the files exist and are within the current folder
+            if (file_exists($image_file) && strpos(realpath($image_file), realpath($current_folder)) === 0) {
+                unlink($image_file);
+                $deleted_images[] = $image;
+            }
+            if (file_exists($tag_file) && strpos(realpath($tag_file), realpath($current_folder)) === 0) {
+                unlink($tag_file);
+            }
+        }
+        echo json_encode($deleted_images);
+        exit;
+    }
 }
 
 // Handle downloading of tags (for loading tags via AJAX)
@@ -153,8 +187,8 @@ if (isset($_GET['download_zip'])) {
 // Get list of images
 $images = glob($current_folder . '/*.{jpg,jpeg,png,gif}', GLOB_BRACE);
 
-// Get list of previously used tags
-$all_tags = [];
+// Get list of previously used tags with counts
+$tag_counts = [];
 foreach ($images as $image) {
     $basename = basename($image);
     $filename = pathinfo($basename, PATHINFO_FILENAME);
@@ -162,11 +196,21 @@ foreach ($images as $image) {
     if (file_exists($tag_file)) {
         $tags = file_get_contents($tag_file);
         $tags_array = array_map('trim', explode(',', $tags));
-        $all_tags = array_merge($all_tags, $tags_array);
+        foreach ($tags_array as $tag) {
+            if ($tag !== '') {
+                if (isset($tag_counts[$tag])) {
+                    $tag_counts[$tag]++;
+                } else {
+                    $tag_counts[$tag] = 1;
+                }
+            }
+        }
     }
 }
-$all_tags = array_unique(array_filter($all_tags));
-sort($all_tags);
+
+// Sort tags descending by usage count
+arsort($tag_counts);
+
 ?>
 <!DOCTYPE html>
 <html>
@@ -220,6 +264,7 @@ sort($all_tags);
         form { margin-bottom: 10px; }
         input[type="text"], input[type="file"] { width: 100%; margin-bottom: 5px; }
         .disabled { opacity: 0.5; pointer-events: none; }
+        .error { color: red; }
     </style>
 </head>
 <body>
@@ -228,10 +273,13 @@ sort($all_tags);
     <div class="left">
         <div class="left-top">
             <h3>Previously Used Tags</h3>
+            <button class="button" onclick="selectAllImages()">Select All</button>
+            <button class="button" onclick="deselectAllImages()">Deselect All</button>
+            <button class="button" onclick="deleteSelectedImages()">Delete Selected</button>
             <div id="previous-tags">
-                <?php foreach ($all_tags as $tag): ?>
+                <?php foreach ($tag_counts as $tag => $count): ?>
                     <span class="tag" data-tag="<?= htmlspecialchars($tag) ?>">
-                        <?= htmlspecialchars($tag) ?>
+                        <?= htmlspecialchars($tag) ?> (<?= $count ?>)
                     </span>
                 <?php endforeach; ?>
             </div>
@@ -251,7 +299,7 @@ sort($all_tags);
             </form>
             <?php else: ?>
             <h3>Upload New Images</h3>
-            <p style="color:red;">Uploads are not allowed in the default folder. Please set a different folder.</p>
+            <p class="error">Uploads are not allowed in the default folder. Please set a different folder.</p>
             <?php endif; ?>
             <button class="button" onclick="downloadZip()">
                 Download All as ZIP</button>
@@ -290,13 +338,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // Image click to select
         item.addEventListener('click', function(e) {
             if (e.target.tagName.toLowerCase() != 'textarea') {
-                item.classList.toggle('selected');
-                var index = selectedImages.indexOf(imageName);
-                if (index > -1) {
-                    selectedImages.splice(index, 1);
-                } else {
-                    selectedImages.push(imageName);
-                }
+                toggleSelection(item, imageName);
             }
         });
         // Auto-save tags when textarea loses focus
@@ -319,6 +361,77 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 });
 
+function toggleSelection(item, imageName) {
+    item.classList.toggle('selected');
+    var index = selectedImages.indexOf(imageName);
+    if (index > -1) {
+        selectedImages.splice(index, 1);
+    } else {
+        selectedImages.push(imageName);
+    }
+}
+
+function selectAllImages() {
+    selectedImages = [];
+    var imageItems = document.querySelectorAll('.image-item');
+    imageItems.forEach(function(item) {
+        var imageName = item.getAttribute('data-image');
+        if (!item.classList.contains('selected')) {
+            item.classList.add('selected');
+        }
+        if (selectedImages.indexOf(imageName) == -1) {
+            selectedImages.push(imageName);
+        }
+    });
+}
+
+function deselectAllImages() {
+    selectedImages = [];
+    var imageItems = document.querySelectorAll('.image-item');
+    imageItems.forEach(function(item) {
+        item.classList.remove('selected');
+    });
+}
+
+function deleteSelectedImages() {
+    if (selectedImages.length === 0) {
+        alert('Please select images to delete.');
+        return;
+    }
+    if (selectedImages.length > 10) {
+        alert('You can delete a maximum of 10 images at a time.');
+        return;
+    }
+    if (!confirm('Are you sure you want to delete the selected images?')) {
+        return;
+    }
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '<?= basename($_SERVER['PHP_SELF']); ?>', true);
+    xhr.setRequestHeader('Content-type',
+        'application/x-www-form-urlencoded');
+    var data = 'action=delete_selected&selected_images[]='
+        + selectedImages.map(encodeURIComponent).join('&selected_images[]=');
+    xhr.onload = function() {
+        if (xhr.status == 200) {
+            try {
+                var deletedImages = JSON.parse(xhr.responseText);
+                deletedImages.forEach(function(imageName) {
+                    var item = document.querySelector('.image-item[data-image="'
+                        + imageName + '"]');
+                    if (item) {
+                        item.parentNode.removeChild(item);
+                    }
+                });
+                selectedImages = [];
+                alert('Selected images have been deleted.');
+            } catch (e) {
+                alert(xhr.responseText);
+            }
+        }
+    };
+    xhr.send(data);
+}
+
 function loadTags(imageName, textarea) {
     var xhr = new XMLHttpRequest();
     xhr.open('GET', '<?= basename($_SERVER['PHP_SELF']); ?>?action=get_tags&image='
@@ -332,18 +445,28 @@ function loadTags(imageName, textarea) {
 }
 
 function saveTags(imageName, tags) {
+    var cleanTagsStr = cleanTags(tags);
     var xhr = new XMLHttpRequest();
     xhr.open('POST', '<?= basename($_SERVER['PHP_SELF']); ?>', true);
     xhr.setRequestHeader('Content-type',
         'application/x-www-form-urlencoded');
     xhr.onload = function() {
         if (xhr.status == 200) {
-            updatePreviouslyUsedTags(tags);
+            updatePreviouslyUsedTags(cleanTagsStr);
         }
     };
     xhr.send('action=update_tags&image='
         + encodeURIComponent(imageName)
-        + '&tags=' + encodeURIComponent(tags));
+        + '&tags=' + encodeURIComponent(cleanTagsStr));
+}
+
+function cleanTags(tags) {
+    var tagsArray = tags.split(',').map(function(t) {
+        return t.trim();
+    }).filter(function(t) {
+        return t !== '';
+    });
+    return tagsArray.join(', ');
 }
 
 function updatePreviouslyUsedTags(newTags) {
@@ -357,26 +480,36 @@ function updatePreviouslyUsedTags(newTags) {
     } else {
         tagsArray = [newTags];
     }
-    var previousTags = document.querySelectorAll('#previous-tags .tag');
-    var existingTags = [];
+    var previousTagsContainer = document.getElementById('previous-tags');
+    var previousTags = previousTagsContainer.querySelectorAll('.tag');
+    var existingTags = {};
     previousTags.forEach(function(tag) {
-        existingTags.push(tag.getAttribute('data-tag'));
+        var tagText = tag.getAttribute('data-tag');
+        existingTags[tagText] = tag;
     });
     tagsArray.forEach(function(tag) {
-        if (existingTags.indexOf(tag) == -1 && tag != '') {
-            var span = document.createElement('span');
-            span.className = 'tag';
-            span.setAttribute('data-tag', tag);
-            span.textContent = tag;
-            span.addEventListener('click', function() {
-                if (selectedImages.length > 0) {
-                    addTagToSelectedImages(tag);
-                } else {
-                    alert('Please select images to add tag.');
-                }
-            });
-            document.getElementById('previous-tags')
-                .appendChild(span);
+        if (tag != '') {
+            if (!existingTags[tag]) {
+                var span = document.createElement('span');
+                span.className = 'tag';
+                span.setAttribute('data-tag', tag);
+                span.textContent = tag + ' (1)';
+                span.addEventListener('click', function() {
+                    if (selectedImages.length > 0) {
+                        addTagToSelectedImages(tag);
+                    } else {
+                        alert('Please select images to add tag.');
+                    }
+                });
+                previousTagsContainer.insertBefore(span, previousTagsContainer.firstChild);
+            } else {
+                // Increment the count
+                var currentCount = parseInt(existingTags[tag].textContent.match(/\((\d+)\)$/)[1]);
+                currentCount++;
+                existingTags[tag].textContent = tag + ' (' + currentCount + ')';
+                // Move the tag to the top
+                previousTagsContainer.insertBefore(existingTags[tag], previousTagsContainer.firstChild);
+            }
         }
     });
 }
@@ -398,13 +531,16 @@ function addTagToSelectedImages(tag) {
                 var textarea = item.querySelector('.tags-input');
                 var tags = textarea.value.split(',').map(function(t) {
                     return t.trim();
+                }).filter(function(t) {
+                    return t !== '';
                 });
                 if (tags.indexOf(tag) == -1) {
                     tags.push(tag);
-                    textarea.value = tags.join(', ');
+                    var cleanTagsStr = tags.join(', ');
+                    textarea.value = cleanTagsStr;
+                    updatePreviouslyUsedTags(tag);
                 }
             });
-            updatePreviouslyUsedTags(tag);
         }
     };
     xhr.send(data);
